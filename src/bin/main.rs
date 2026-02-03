@@ -21,11 +21,22 @@ use esp_hub75::Hub75;
 use esp_radio::wifi::WifiDevice;
 use esp_rtos::embassy::{Executor, InterruptExecutor};
 use heapless::Vec;
-use log::{error, info};
+use log::{debug, error, info};
 use static_cell::StaticCell;
 
 // Include generated config
 include!(concat!(env!("OUT_DIR"), "/config.rs"));
+
+// Timing constants (in milliseconds)
+const DISPLAY_REFRESH_INTERVAL_MS: u64 = 5; // ~200fps for brightness
+const SCROLL_UPDATE_INTERVAL_MS: u64 = 66; // ~15Hz scroll speed
+const RENDER_UPDATE_INTERVAL_MS: u64 = 66; // Match scroll rate for smooth animation
+const API_FETCH_INTERVAL_SECS: u64 = 20; // Fetch new data every 20 seconds
+
+// Logging intervals
+const DISPLAY_LOG_INTERVAL: u32 = 5000; // Log every 5000 frames
+const SCROLL_LOG_INTERVAL: i32 = 100; // Log every 100 pixels
+const RENDER_LOG_INTERVAL: u32 = 100; // Log every 100 frames
 
 // Type alias for departure data: (line, destination, time)
 type DepartureData = Vec<
@@ -200,11 +211,27 @@ async fn main(spawner: Spawner) -> ! {
         Mutex::new(*fb)
     );
 
-    // Start second core for display refresh (high priority, dedicated core)
-    info!("Starting display refresh on Core 1 (dedicated)...");
+    // Create shared departure data storage
+    let departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData> = mk_static!(
+        Mutex<CriticalSectionRawMutex, DepartureData>,
+        Mutex::new(Vec::new())
+    );
+
+    // Create shared scroll offset (using AtomicI32 for lock-free updates)
+    use core::sync::atomic::AtomicI32;
+    let scroll_offset: &'static AtomicI32 = mk_static!(AtomicI32, AtomicI32::new(0));
+
+    // Start second core for display operations (dedicated core)
+    // Architecture:
+    //   Core 0: Network/API (fetch, parse, scroll calculation) - can have variable latency
+    //   Core 1: Display only (refresh + render) - must be consistently fast for smooth visuals
+    // This isolation prevents HTTP parsing stutters from affecting display rendering
+    info!("Starting display tasks on Core 1 (dedicated)...");
 
     let cpu1_fn = {
         let display = display;
+        let departure_data_core1 = departure_data;
+        let scroll_offset_core1 = scroll_offset;
         move || {
             let hp_executor = mk_static!(
                 InterruptExecutor<2>,
@@ -217,9 +244,19 @@ async fn main(spawner: Spawner) -> ! {
                 .spawn(display_refresh_task(display, fb_mutex))
                 .ok();
 
-            // Low priority executor for any other core 1 tasks
+            // Low priority executor for render task (still on Core 1, isolated from network/parsing)
             let lp_executor = mk_static!(Executor, Executor::new());
-            lp_executor.run(|_spawner| {});
+
+            // Render task runs on Core 1 to avoid stutters from Core 0 network/parsing work
+            lp_executor.run(move |spawner| {
+                spawner
+                    .spawn(render_task(
+                        fb_mutex,
+                        departure_data_core1,
+                        scroll_offset_core1,
+                    ))
+                    .ok();
+            });
         }
     };
 
@@ -235,38 +272,22 @@ async fn main(spawner: Spawner) -> ! {
         cpu1_fn,
     );
 
-    info!("Display running on Core 1 - showing initial placeholder");
+    info!("Core 1 running: display refresh (high priority) + render task (low priority)");
 
     // Make stack static for data fetch task
     let stack = mk_static!(embassy_net::Stack<'static>, stack);
 
-    // Create shared departure data storage
-    let departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData> = mk_static!(
-        Mutex<CriticalSectionRawMutex, DepartureData>,
-        Mutex::new(Vec::new())
-    );
-
-    // Create shared scroll offset (using AtomicI32 for lock-free updates)
-    use core::sync::atomic::AtomicI32;
-    let scroll_offset: &'static AtomicI32 = mk_static!(AtomicI32, AtomicI32::new(0));
-
-    // Start data fetch task on Core 0 (updates departure data every 30s)
+    // Start data fetch task on Core 0 (updates departure data, handles parsing)
     info!("Starting data fetch task on Core 0...");
     spawner
         .spawn(data_fetch_task(stack, tls_seed, departure_data))
         .expect("Failed to spawn data fetch task");
 
-    // Start scroll task on Core 0 (updates scroll offset)
+    // Start scroll task on Core 0 (updates scroll offset - lightweight)
     info!("Starting scroll task on Core 0...");
     spawner
         .spawn(scroll_task(departure_data, scroll_offset))
         .expect("Failed to spawn scroll task");
-
-    // Start render task on Core 0 (redraws display with current scroll offset)
-    info!("Starting render task on Core 0...");
-    spawner
-        .spawn(render_task(fb_mutex, departure_data, scroll_offset))
-        .expect("Failed to spawn render task");
 
     // Main task just waits
     loop {
@@ -297,12 +318,12 @@ async fn display_refresh_task(
         drop(fb_locked); // NOW it's safe to release
 
         counter += 1;
-        if counter % 5000 == 0 {
-            info!("Display: {} frames rendered", counter);
+        if counter % DISPLAY_LOG_INTERVAL == 0 {
+            debug!("Display: {} frames rendered", counter);
         }
 
-        // Run at ~200fps (5ms) to maintain brightness while allowing render task to update
-        Timer::after(Duration::from_millis(5)).await;
+        // Run at ~200fps to maintain brightness while allowing render task to update
+        Timer::after(Duration::from_millis(DISPLAY_REFRESH_INTERVAL_MS)).await;
     }
 }
 
@@ -345,8 +366,11 @@ async fn data_fetch_task(
             }
         }
 
-        info!("Waiting 20 seconds until next fetch...");
-        Timer::after(Duration::from_secs(20)).await;
+        info!(
+            "Waiting {} seconds until next fetch...",
+            API_FETCH_INTERVAL_SECS
+        );
+        Timer::after(Duration::from_secs(API_FETCH_INTERVAL_SECS)).await;
     }
 }
 
@@ -396,7 +420,7 @@ async fn scroll_task(
                         total_width += 12; // Separator "  " = 2 chars = 12 pixels
                     }
                 }
-                info!(
+                debug!(
                     "Scroll: stations changed, recalculated total_width={}",
                     total_width
                 );
@@ -419,13 +443,13 @@ async fn scroll_task(
             };
             scroll_offset.store(next, Ordering::Relaxed);
 
-            if next % 100 == 0 {
-                info!("Scroll: offset={} (reset at {})", next, reset_point);
+            if next % SCROLL_LOG_INTERVAL == 0 {
+                debug!("Scroll: offset={} (reset at {})", next, reset_point);
             }
         }
 
-        // Scroll speed at ~15Hz (66ms per frame)
-        Timer::after(Duration::from_millis(66)).await;
+        // Scroll speed
+        Timer::after(Duration::from_millis(SCROLL_UPDATE_INTERVAL_MS)).await;
     }
 }
 
@@ -438,7 +462,7 @@ async fn render_task(
 ) -> ! {
     use core::sync::atomic::Ordering;
 
-    info!("Render task started");
+    info!("Render task started on Core 1 (isolated from Core 0 network/parsing)");
     let mut frame_count = 0u32;
 
     loop {
@@ -464,12 +488,12 @@ async fn render_task(
         drop(fb_locked);
 
         frame_count += 1;
-        if frame_count % 100 == 0 {
-            info!("Render: {} frames", frame_count);
+        if frame_count % RENDER_LOG_INTERVAL == 0 {
+            debug!("Render: {} frames", frame_count);
         }
 
-        // Render at same speed as scroll for smooth animation
-        Timer::after(Duration::from_millis(30)).await;
+        // Render rate
+        Timer::after(Duration::from_millis(RENDER_UPDATE_INTERVAL_MS)).await;
     }
 }
 

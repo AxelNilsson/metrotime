@@ -18,6 +18,10 @@ const BITS: u8 = 2; // 2-bit color depth (reduced for larger displays to save me
 const NROWS: usize = compute_rows(ROWS);
 const FRAME_COUNT: usize = compute_frame_count(BITS);
 
+// Color constants
+const COLOR_RED: Color = Color::new(255, 0, 0);
+const COLOR_GREEN: Color = Color::new(0, 255, 0);
+
 pub type DisplayFrameBuffer = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
 pub type Hub75Type = Hub75<'static, esp_hal::Blocking>;
 
@@ -132,18 +136,18 @@ fn draw_text(fb: &mut DisplayFrameBuffer, text: &str, x: i32, y: i32, color: Col
 fn get_time_color(time: &str) -> Color {
     // Check if time is "Nu" (Now)
     if time.trim() == "Nu" {
-        return Color::new(255, 0, 0); // Red
+        return COLOR_RED;
     }
 
     // Check if time is in "X min" format
     if let Some(min_str) = time.strip_suffix(" min") {
         if let Ok(minutes) = min_str.trim().parse::<u32>() {
             if minutes <= 5 {
-                return Color::new(255, 0, 0); // Red
+                return COLOR_RED;
             }
         }
     }
-    Color::new(0, 255, 0) // Green
+    COLOR_GREEN
 }
 
 /// Initialize the HUB75 LED matrix display with Matrix Portal S3 pins
@@ -208,8 +212,17 @@ pub fn init_display<'d>(
     Ok(hub75)
 }
 
-/// Draw metro departure information on the display
-/// `scroll_offset` specifies the horizontal scroll position for the bottom row (in pixels)
+/// Draws metro departure information on the LED display.
+///
+/// # Arguments
+/// * `fb` - The framebuffer to draw to
+/// * `departures` - Array of (line, destination, time) tuples
+/// * `scroll_offset` - Horizontal scroll offset in pixels for the bottom row
+///
+/// # Layout
+/// - Top row: First upcoming departure (line, destination on left; time on right)
+/// - Bottom row: Remaining departures scrolling continuously
+/// - Color: Red if departure is ≤5 minutes or "Nu" (now), green otherwise
 pub fn draw_departures(
     fb: &mut DisplayFrameBuffer,
     departures: &[(
@@ -224,7 +237,7 @@ pub fn draw_departures(
 
     if departures.is_empty() {
         // No departures available
-        draw_text(fb, "no departures", 2, 12, Color::new(0, 255, 0));
+        draw_text(fb, "no departures", 2, 12, COLOR_GREEN);
     } else {
         // Show first departure
         let (line, dest, time) = &departures[0];
@@ -319,8 +332,8 @@ pub fn draw_departures(
                 line1.push_str(dest.as_str()).ok();
             }
 
-            draw_text(fb, line1.as_str(), 2, 8, Color::new(0, 255, 0));
-            draw_text(fb, time.as_str(), 2, 20, Color::new(0, 255, 0));
+            draw_text(fb, line1.as_str(), 2, 8, COLOR_GREEN);
+            draw_text(fb, time.as_str(), 2, 20, COLOR_GREEN);
         }
     }
 }
