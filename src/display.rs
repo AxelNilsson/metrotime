@@ -8,15 +8,22 @@ use esp_hub75::framebuffer::plain::DmaFrameBuffer;
 use esp_hub75::{Color, Hub75, Hub75Pins16};
 use log::info;
 
+// Include generated config
+include!(concat!(env!("OUT_DIR"), "/config.rs"));
+
 // Display configuration
-const ROWS: usize = 32; // 64x32 matrix
-const COLS: usize = 64;
-const BITS: u8 = 4; // 4-bit color depth
+const ROWS: usize = display::ROWS;
+const COLS: usize = display::COLS;
+const BITS: u8 = 2; // 2-bit color depth (reduced for larger displays to save memory)
 const NROWS: usize = compute_rows(ROWS);
 const FRAME_COUNT: usize = compute_frame_count(BITS);
 
 pub type DisplayFrameBuffer = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
 pub type Hub75Type = Hub75<'static, esp_hal::Blocking>;
+
+// Export display dimensions for use in main
+pub const DISPLAY_ROWS: usize = ROWS;
+pub const DISPLAY_COLS: usize = COLS;
 
 // Simple 5x7 bitmap font (each character is 5 pixels wide, 7 pixels tall)
 // Bit pattern: top to bottom, left to right
@@ -223,8 +230,8 @@ pub fn draw_departures(
 /// Simple test pattern to verify display is working
 pub fn draw_test_pattern(fb: &mut DisplayFrameBuffer) {
     // Start with all green - easiest to see
-    for y in 0..32 {
-        for x in 0..64 {
+    for y in 0..ROWS as i32 {
+        for x in 0..COLS as i32 {
             fb.set_pixel(Point::new(x, y), Color::new(0, 64, 0)); // Dim green
         }
     }

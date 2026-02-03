@@ -13,6 +13,7 @@ fn generate_config() {
     #[derive(Deserialize)]
     struct Config {
         wifi: WifiConfig,
+        display: DisplayConfig,
         network: NetworkConfig,
         api: ApiConfig,
     }
@@ -21,6 +22,13 @@ fn generate_config() {
     struct WifiConfig {
         ssid: String,
         password: String,
+    }
+
+    #[derive(Deserialize)]
+    struct DisplayConfig {
+        num_screens: u8,
+        rows: usize,
+        cols: usize,
     }
 
     #[derive(Deserialize)]
@@ -75,6 +83,12 @@ pub mod wifi {{
     pub const PASSWORD: &str = "{}";
 }}
 
+pub mod display {{
+    pub const NUM_SCREENS: u8 = {};
+    pub const ROWS: usize = {};
+    pub const COLS: usize = {};
+}}
+
 pub mod network {{
     pub const DHCP_TIMEOUT_MS: u32 = {};
     pub const LINK_CHECK_INTERVAL_MS: u64 = {};
@@ -113,6 +127,9 @@ pub mod api {{
 "#,
         config.wifi.ssid,
         config.wifi.password,
+        config.display.num_screens,
+        config.display.rows,
+        config.display.cols * config.display.num_screens as usize,
         config.network.dhcp_timeout_ms,
         config.network.link_check_interval_ms,
         config.network.ip_check_interval_ms,

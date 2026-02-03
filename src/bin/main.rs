@@ -74,6 +74,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     info!("HAL initialized with CPU clock: {:?}", CpuClock::max());
 
+    // Framebuffer is allocated as static data (not heap), size reduced via 2-bit color depth
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -181,17 +182,14 @@ async fn main(spawner: Spawner) -> ! {
     // Fill entire screen black first
     use embedded_graphics::prelude::*;
 
-    info!("Drawing black background and green text...");
-    for y in 0..32 {
-        for x in 0..64 {
+    for y in 0..metrotimes3::display::DISPLAY_ROWS as i32 {
+        for x in 0..metrotimes3::display::DISPLAY_COLS as i32 {
             fb.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
         }
     }
 
     // Now draw "no departures" in GREEN using custom bitmap font
     metrotimes3::display::draw_departures(fb, &[]);
-
-    info!("Drew 'no departures' in green");
 
     // Wrap framebuffer in mutex for safe sharing
     let fb_mutex: &'static Mutex<
