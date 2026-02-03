@@ -300,6 +300,19 @@ async fn data_fetch_task(
     info!("Data fetch task started");
 
     loop {
+        // Check network connectivity before making request
+        if !stack.is_link_up() {
+            error!("WiFi link is down, skipping fetch");
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        if stack.config_v4().is_none() {
+            error!("No IP address, skipping fetch");
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
         match metrotimes3::api::fetch_departures(stack, tls_seed).await {
             Ok(departures) => {
                 info!("Fetched {} departures", departures.len());

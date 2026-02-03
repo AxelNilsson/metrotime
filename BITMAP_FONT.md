@@ -1,10 +1,10 @@
 # Character Bitmap Font Documentation
 
-This document describes how we created the 5x7 bitmap font used in the LED matrix display.
+This document describes how we created the 5x8 bitmap font used in the LED matrix display.
 
 ## Overview
 
-The font is a custom 5x7 pixel bitmap font designed for the 64x32 LED matrix display. Each character consists of 5 columns (width) and 7 rows (height), stored as an array of 5 bytes.
+The font is a custom 5x8 pixel bitmap font designed for the 64x32 LED matrix display. Each character consists of 5 columns (width) and 8 rows (height), stored as an array of 5 bytes.
 
 ## Data Structure
 
@@ -20,7 +20,7 @@ const FONT_5X7: &[(&str, [u8; 5])] = &[
 
 Each entry is a tuple containing:
 - Character string (supports multi-byte UTF-8 characters like "å")
-- Array of 5 bytes representing the character bitmap
+- Array of 5 bytes representing the character bitmap (each byte contains 8 rows)
 
 ## Bitmap Encoding
 
@@ -38,7 +38,7 @@ Within each byte (column):
 - **Bit 4** = Row 4
 - **Bit 5** = Row 5
 - **Bit 6** = Row 6
-- **Bit 7** (MSB) = Bottom pixel (row 7, usually unused in 5x7 font)
+- **Bit 7** (MSB) = Bottom pixel (row 7)
 
 ### Example: Character "0"
 
@@ -57,10 +57,10 @@ Row 3:    1  0  0  0  1
 Row 4:    1  0  0  0  1
 Row 5:    1  0  0  0  1
 Row 6:    1  0  0  0  1
-Row 7:    0  0  0  0  0
+Row 7:    0  1  1  1  0
 ```
 
-This creates the outline of the number "0".
+This creates the outline of the number "0" using all 8 rows.
 
 ## Character Set
 
@@ -137,11 +137,11 @@ Characters are spaced 6 pixels apart (5 pixels for character width + 1 pixel spa
 
 The bitmap values were created manually by:
 
-1. **Designing the character** on a 5x7 grid (on paper or using a pixel editor)
+1. **Designing the character** on a 5x8 grid (on paper or using a pixel editor)
 2. **Converting columns to binary**:
    - For each of the 5 columns (left to right)
-   - Read the pixels from top to bottom
-   - Create an 8-bit binary number where 1 = lit pixel, 0 = off
+   - Read the pixels from top to bottom (row 0 to row 7)
+   - Create an 8-bit binary number where bit 0 = top pixel, bit 7 = bottom pixel, and 1 = lit pixel, 0 = off
 3. **Converting to hexadecimal**:
    - Convert each 8-bit binary number to hex (0x00 to 0xFF)
 4. **Testing on the display** to verify legibility

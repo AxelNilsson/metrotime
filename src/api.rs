@@ -9,6 +9,7 @@ use embassy_net::{
     dns::DnsSocket,
     tcp::client::{TcpClient, TcpClientState},
 };
+use embassy_time::{Duration, with_timeout};
 use log::{error, info};
 use reqwless::client::{HttpClient, TlsConfig};
 
@@ -36,7 +37,8 @@ pub async fn fetch_departures(
     let mut rx_buffer = [0; api::BUFFER_SIZE];
     let mut tx_buffer = [0; 4096];
     let dns = DnsSocket::new(*stack);
-    let tcp_state = TcpClientState::<1, { api::BUFFER_SIZE }, 4096>::new();
+    // Increase socket count from 1 to 2 for better resilience
+    let tcp_state = TcpClientState::<2, { api::BUFFER_SIZE }, 4096>::new();
     let tcp = TcpClient::new(*stack, &tcp_state);
 
     let tls = TlsConfig::new(
@@ -54,29 +56,48 @@ pub async fn fetch_departures(
 
     info!("Making HTTP request to: {}", url);
     info!("Creating HTTP request...");
-    let mut http_req = client
-        .request(reqwless::request::Method::GET, url.as_str())
-        .await
-        .map_err(|e| {
-            error!("Failed to create HTTP request: {:?}", e);
-            "Failed to create HTTP request"
-        })?;
+
+    // Add 20 second timeout for creating request (DNS + TCP connect + TLS handshake)
+    let mut http_req = with_timeout(
+        Duration::from_secs(20),
+        client.request(reqwless::request::Method::GET, url.as_str()),
+    )
+    .await
+    .map_err(|_| {
+        error!("Timeout creating HTTP request after 20 seconds");
+        "Request creation timeout"
+    })?
+    .map_err(|e| {
+        error!("Failed to create HTTP request: {:?}", e);
+        "Failed to create HTTP request"
+    })?;
 
     info!("Sending HTTP request...");
-    let response = http_req.send(&mut buffer).await.map_err(|e| {
-        error!("Failed to send HTTP request: {:?}", e);
-        "Failed to send HTTP request"
-    })?;
+
+    // Add 15 second timeout for sending request and receiving response
+    let response = with_timeout(Duration::from_secs(15), http_req.send(&mut buffer))
+        .await
+        .map_err(|_| {
+            error!("Timeout sending HTTP request after 15 seconds");
+            "Request send timeout"
+        })?
+        .map_err(|e| {
+            error!("Failed to send HTTP request: {:?}", e);
+            "Failed to send HTTP request"
+        })?;
 
     info!("Got response!");
 
     let status = response.status;
     info!("Got response from server - Status: {:?}", status);
 
-    let res = response
-        .body()
-        .read_to_end()
+    // Add 10 second timeout for reading response body
+    let res = with_timeout(Duration::from_secs(10), response.body().read_to_end())
         .await
+        .map_err(|_| {
+            error!("Timeout reading response body after 10 seconds");
+            "Response read timeout"
+        })?
         .map_err(|_| "Failed to read response body")?;
 
     let content = core::str::from_utf8(res).map_err(|_| "Response is not valid UTF-8")?;
