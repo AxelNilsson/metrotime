@@ -28,9 +28,7 @@ use static_cell::StaticCell;
 include!(concat!(env!("OUT_DIR"), "/config.rs"));
 
 // Timing constants (in milliseconds)
-const DISPLAY_REFRESH_INTERVAL_MS: u64 = 5; // ~200fps for brightness
-const SCROLL_UPDATE_INTERVAL_MS: u64 = 66; // ~15Hz scroll speed
-const RENDER_UPDATE_INTERVAL_MS: u64 = 66; // Match scroll rate for smooth animation
+const DISPLAY_REFRESH_INTERVAL_MS: u64 = 2; // ~500fps for PWM brightness
 const API_FETCH_INTERVAL_SECS: u64 = 20; // Fetch new data every 20 seconds
 
 // Logging intervals
@@ -199,8 +197,8 @@ async fn main(spawner: Spawner) -> ! {
         }
     }
 
-    // Now draw "no departures" in GREEN using custom bitmap font
-    metrotimes3::display::draw_departures(fb, &[], 0);
+    // Show "LOADING" message initially
+    metrotimes3::display::draw_loading(fb);
 
     // Wrap framebuffer in mutex for safe sharing
     let fb_mutex: &'static Mutex<
@@ -448,8 +446,8 @@ async fn scroll_task(
             }
         }
 
-        // Scroll speed
-        Timer::after(Duration::from_millis(SCROLL_UPDATE_INTERVAL_MS)).await;
+        // Scroll speed (configured in config.toml)
+        Timer::after(Duration::from_millis(display::SCROLL_SPEED_MS)).await;
     }
 }
 
@@ -464,36 +462,49 @@ async fn render_task(
 
     info!("Render task started on Core 1 (isolated from Core 0 network/parsing)");
     let mut frame_count = 0u32;
+    let mut last_offset = -1i32;
+    let mut cached_departures: DepartureData = Vec::new();
 
     loop {
-        // Get current departure data and scroll offset
+        // Check if anything changed
+        let offset = scroll_offset.load(Ordering::Relaxed);
         let data = departure_data.lock().await;
         let departures = data.clone();
         drop(data);
 
-        let offset = scroll_offset.load(Ordering::Relaxed);
+        // Redraw if scroll position changed OR departure data changed (including time updates)
+        let data_changed = departures != cached_departures;
+        if offset != last_offset || data_changed {
+            last_offset = offset;
+            cached_departures = departures.clone();
 
-        // Redraw the display
-        let mut fb_locked = fb.lock().await;
+            // Redraw the display
+            let mut fb_locked = fb.lock().await;
 
-        // Only erase the display area (much faster than full erase)
-        use embedded_graphics::prelude::*;
-        for y in 0..32 {
-            for x in 0..metrotimes3::display::DISPLAY_COLS as i32 {
-                fb_locked.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
+            // Only erase the display area (much faster than full erase)
+            use embedded_graphics::prelude::*;
+            for y in 0..32 {
+                for x in 0..metrotimes3::display::DISPLAY_COLS as i32 {
+                    fb_locked.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
+                }
+            }
+
+            // Draw appropriate content based on departure data
+            if departures.is_empty() {
+                metrotimes3::display::draw_no_departures(&mut *fb_locked);
+            } else {
+                metrotimes3::display::draw_departures(&mut *fb_locked, &departures, offset);
+            }
+            drop(fb_locked);
+
+            frame_count += 1;
+            if frame_count % RENDER_LOG_INTERVAL == 0 {
+                debug!("Render: {} frames", frame_count);
             }
         }
 
-        metrotimes3::display::draw_departures(&mut *fb_locked, &departures, offset);
-        drop(fb_locked);
-
-        frame_count += 1;
-        if frame_count % RENDER_LOG_INTERVAL == 0 {
-            debug!("Render: {} frames", frame_count);
-        }
-
-        // Render rate
-        Timer::after(Duration::from_millis(RENDER_UPDATE_INTERVAL_MS)).await;
+        // Poll frequently to catch changes quickly
+        Timer::after(Duration::from_millis(10)).await;
     }
 }
 

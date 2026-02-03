@@ -29,6 +29,7 @@ fn generate_config() {
         num_screens: u8,
         rows: usize,
         cols: usize,
+        scroll_speed_ms: u64,
     }
 
     #[derive(Deserialize)]
@@ -87,6 +88,7 @@ pub mod display {{
     pub const NUM_SCREENS: u8 = {};
     pub const ROWS: usize = {};
     pub const COLS: usize = {};
+    pub const SCROLL_SPEED_MS: u64 = {};
 }}
 
 pub mod network {{
@@ -130,6 +132,7 @@ pub mod api {{
         config.display.num_screens,
         config.display.rows,
         config.display.cols * config.display.num_screens as usize,
+        config.display.scroll_speed_ms,
         config.network.dhcp_timeout_ms,
         config.network.link_check_interval_ms,
         config.network.ip_check_interval_ms,

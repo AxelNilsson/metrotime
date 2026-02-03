@@ -150,7 +150,16 @@ fn get_time_color(time: &str) -> Color {
     COLOR_GREEN
 }
 
-/// Initialize the HUB75 LED matrix display with Matrix Portal S3 pins
+/// Initializes the HUB75 LED matrix display with Matrix Portal S3 pin configuration.
+///
+/// # Arguments
+/// * `lcd_cam` - LCD_CAM peripheral for driving the display
+/// * `dma_channel` - DMA channel for data transfer
+/// * `gpio*` - GPIO pins for HUB75 interface (RGB1, RGB2, Address lines, Control signals)
+///
+/// # Returns
+/// * `Ok(Hub75)` - Initialized display driver
+/// * `Err(&str)` - Error message if initialization fails
 pub fn init_display<'d>(
     lcd_cam: esp_hal::peripherals::LCD_CAM<'d>,
     dma_channel: esp_hal::peripherals::DMA_CH0<'d>,
@@ -212,6 +221,22 @@ pub fn init_display<'d>(
     Ok(hub75)
 }
 
+/// Draws a loading message on the display.
+///
+/// # Arguments
+/// * `fb` - The framebuffer to draw to
+pub fn draw_loading(fb: &mut DisplayFrameBuffer) {
+    draw_text(fb, "LOADING", 2, 12, COLOR_GREEN);
+}
+
+/// Draws a "no departures" message on the display.
+///
+/// # Arguments
+/// * `fb` - The framebuffer to draw to
+pub fn draw_no_departures(fb: &mut DisplayFrameBuffer) {
+    draw_text(fb, "NO DEPARTURES", 2, 12, COLOR_GREEN);
+}
+
 /// Draws metro departure information on the LED display.
 ///
 /// # Arguments
@@ -236,8 +261,9 @@ pub fn draw_departures(
     // Draw text in GREEN using custom bitmap font
 
     if departures.is_empty() {
-        // No departures available
-        draw_text(fb, "no departures", 2, 12, COLOR_GREEN);
+        // This should not be called with empty departures
+        // Use draw_loading() or draw_no_departures() instead
+        return;
     } else {
         // Show first departure
         let (line, dest, time) = &departures[0];
@@ -338,7 +364,12 @@ pub fn draw_departures(
     }
 }
 
-/// Simple test pattern to verify display is working
+/// Draws a simple test pattern to verify the display is working correctly.
+///
+/// Fills the entire display with dim green, useful for hardware testing.
+///
+/// # Arguments
+/// * `fb` - The framebuffer to draw the test pattern to
 pub fn draw_test_pattern(fb: &mut DisplayFrameBuffer) {
     // Start with all green - easiest to see
     for y in 0..ROWS as i32 {
