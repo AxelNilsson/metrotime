@@ -128,6 +128,24 @@ fn draw_text(fb: &mut DisplayFrameBuffer, text: &str, x: i32, y: i32, color: Col
     }
 }
 
+/// Determine color based on departure time (red if 5 min or less, otherwise green)
+fn get_time_color(time: &str) -> Color {
+    // Check if time is "Nu" (Now)
+    if time.trim() == "Nu" {
+        return Color::new(255, 0, 0); // Red
+    }
+
+    // Check if time is in "X min" format
+    if let Some(min_str) = time.strip_suffix(" min") {
+        if let Ok(minutes) = min_str.trim().parse::<u32>() {
+            if minutes <= 5 {
+                return Color::new(255, 0, 0); // Red
+            }
+        }
+    }
+    Color::new(0, 255, 0) // Green
+}
+
 /// Initialize the HUB75 LED matrix display with Matrix Portal S3 pins
 pub fn init_display<'d>(
     lcd_cam: esp_hal::peripherals::LCD_CAM<'d>,
@@ -230,55 +248,62 @@ pub fn draw_departures(
             }
 
             // Draw first departure: line and destination at the left, time at the right
-            draw_text(fb, line1.as_str(), 2, 8, Color::new(0, 255, 0));
+            // Use red for both station and time if departure is 5 min or less
+            let departure_color = get_time_color(time.as_str());
+            draw_text(fb, line1.as_str(), 2, 5, departure_color);
 
             let time_width = time.len() as i32 * 6;
             let time_x = (COLS as i32) - time_width - 2;
-            draw_text(fb, time.as_str(), time_x, 8, Color::new(0, 255, 0));
+            draw_text(fb, time.as_str(), time_x, 5, departure_color);
 
-            // Draw bottom row: concatenate all remaining departures
+            // Draw bottom row: draw each departure with appropriate time color
             if departures.len() > 1 {
-                let mut bottom_text = heapless::String::<256>::new();
-
+                // Calculate total width for the loop
+                let mut total_text_width = 0i32;
                 for i in 1..departures.len() {
                     let (line_n, dest_n, time_n) = &departures[i];
-
-                    // Add separator between departures
+                    let entry_len = line_n.len() + 1 + dest_n.len() + 1 + time_n.len();
+                    total_text_width += entry_len as i32 * 6;
                     if i > 1 {
-                        bottom_text.push_str("  ").ok();
+                        total_text_width += 12; // Separator spacing
                     }
-
-                    // Format: "17 Destination 5 min"
-                    bottom_text.push_str(line_n.as_str()).ok();
-                    bottom_text.push(' ').ok();
-                    bottom_text.push_str(dest_n.as_str()).ok();
-                    bottom_text.push(' ').ok();
-                    bottom_text.push_str(time_n.as_str()).ok();
                 }
 
-                // Calculate text width in pixels (6 pixels per character)
-                let text_width = bottom_text.len() as i32 * 6;
+                // Draw departures twice for seamless loop
+                for loop_iteration in 0..2 {
+                    let base_x = if loop_iteration == 0 {
+                        (COLS as i32) - scroll_offset
+                    } else {
+                        (COLS as i32) - scroll_offset + total_text_width + COLS as i32
+                    };
 
-                // Draw the scrolling text with offset (creates continuous loop)
-                // Start from right edge and scroll left
-                // Draw first instance
-                draw_text(
-                    fb,
-                    bottom_text.as_str(),
-                    (COLS as i32) - scroll_offset,
-                    20,
-                    Color::new(0, 255, 0),
-                );
+                    let mut cursor_x = base_x;
 
-                // Draw second instance to create seamless loop
-                // Position it one full screen width after the first instance
-                draw_text(
-                    fb,
-                    bottom_text.as_str(),
-                    (COLS as i32) - scroll_offset + text_width + COLS as i32,
-                    20,
-                    Color::new(0, 255, 0),
-                );
+                    for i in 1..departures.len() {
+                        let (line_n, dest_n, time_n) = &departures[i];
+
+                        // Add separator between departures
+                        if i > 1 {
+                            cursor_x += 12; // "  " spacing
+                        }
+
+                        // Get color for this departure (red if 5 min or less, green otherwise)
+                        let departure_color = get_time_color(time_n.as_str());
+
+                        // Draw line and destination
+                        let mut line_dest = heapless::String::<64>::new();
+                        line_dest.push_str(line_n.as_str()).ok();
+                        line_dest.push(' ').ok();
+                        line_dest.push_str(dest_n.as_str()).ok();
+                        line_dest.push(' ').ok();
+                        draw_text(fb, line_dest.as_str(), cursor_x, 20, departure_color);
+                        cursor_x += line_dest.len() as i32 * 6;
+
+                        // Draw time in same color
+                        draw_text(fb, time_n.as_str(), cursor_x, 20, departure_color);
+                        cursor_x += time_n.len() as i32 * 6;
+                    }
+                }
             }
         } else {
             // Single screen: show "17 Dest" on line 1, "2 min" on line 2
