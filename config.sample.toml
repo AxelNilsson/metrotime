@@ -1,0 +1,40 @@
+# WiFi Configuration
+[wifi]
+ssid = "YOUR_WIFI_SSID"
+password = "YOUR_WIFI_PASSWORD"
+
+# Network Configuration
+[network]
+# DHCP timeout in milliseconds
+dhcp_timeout_ms = 10000
+# Check interval for link up (milliseconds)
+link_check_interval_ms = 100
+# Check interval for IP assignment (milliseconds)
+ip_check_interval_ms = 100
+
+# API Configuration
+[api]
+# Site ID (e.g., 9144 for Hammarbyhöjden)
+site_id = YOUR_SITE_ID
+# Mode: "departures" or "arrivals"
+mode = "departures"
+# Query parameters
+transport = "METRO"
+# Direction number (1 for south, 2 for north)
+direction = 1
+# Line number (optional - omit or comment out to get all lines)
+# line = YOUR_LINE_NUMBER
+forecast = 60
+# Request interval in seconds
+request_interval_secs = 30
+# Maximum retry attempts for failed requests
+max_retries = 3
+# Delay between retries in seconds
+retry_delay_secs = 2
+# Minimum expected response size (bytes)
+min_response_size = 100
+# HTTP/TCP buffer size in bytes (default: 8192)
+# This controls both TCP receive buffer and HTTP response buffer
+# Responses larger than this will fail. Increase if needed (e.g., 16384)
+# Site responses vary: ~2KB without stop_deviations, ~8KB+ with them
+buffer_size = 8192
