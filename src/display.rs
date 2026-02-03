@@ -191,6 +191,7 @@ pub fn init_display<'d>(
 }
 
 /// Draw metro departure information on the display
+/// `scroll_offset` specifies the horizontal scroll position for the bottom row (in pixels)
 pub fn draw_departures(
     fb: &mut DisplayFrameBuffer,
     departures: &[(
@@ -198,6 +199,7 @@ pub fn draw_departures(
         heapless::String<32>,
         heapless::String<16>,
     )], // (line, destination, time)
+    scroll_offset: i32, // Horizontal scroll offset for bottom row
 ) {
     // DON'T erase - background is already black from caller
     // Draw text in GREEN using custom bitmap font
@@ -206,24 +208,95 @@ pub fn draw_departures(
         // No departures available
         draw_text(fb, "no departures", 2, 12, Color::new(0, 255, 0));
     } else {
-        // Show first departure: "17 Dest" on line 1, "2 min" on line 2
+        // Show first departure
         let (line, dest, time) = &departures[0];
 
-        // Format: "17 Destination" - truncate if too long (max ~10 chars)
-        let mut line1 = heapless::String::<16>::new();
-        line1.push_str(line.as_str()).ok();
-        line1.push(' ').ok();
+        // Check if we have enough space for single-line layout (dual screen or more)
+        // Each char is 6 pixels wide (5 + 1 spacing), need ~100+ pixels for single line
+        let single_line_layout = COLS >= 100;
 
-        // Truncate destination to fit (about 7-8 chars max)
-        let max_dest_len = 8;
-        if dest.len() > max_dest_len {
-            line1.push_str(&dest.as_str()[..max_dest_len]).ok();
+        if single_line_layout {
+            // Dual/triple screen: show first departure on row 1, rest scrolling on row 2
+            let mut line1 = heapless::String::<32>::new();
+            line1.push_str(line.as_str()).ok();
+            line1.push(' ').ok();
+
+            // Destination can be longer on dual screen (up to ~10 chars)
+            let max_dest_len = 10;
+            if dest.len() > max_dest_len {
+                line1.push_str(&dest.as_str()[..max_dest_len]).ok();
+            } else {
+                line1.push_str(dest.as_str()).ok();
+            }
+
+            // Draw first departure: line and destination at the left, time at the right
+            draw_text(fb, line1.as_str(), 2, 8, Color::new(0, 255, 0));
+
+            let time_width = time.len() as i32 * 6;
+            let time_x = (COLS as i32) - time_width - 2;
+            draw_text(fb, time.as_str(), time_x, 8, Color::new(0, 255, 0));
+
+            // Draw bottom row: concatenate all remaining departures
+            if departures.len() > 1 {
+                let mut bottom_text = heapless::String::<256>::new();
+
+                for i in 1..departures.len() {
+                    let (line_n, dest_n, time_n) = &departures[i];
+
+                    // Add separator between departures
+                    if i > 1 {
+                        bottom_text.push_str("  ").ok();
+                    }
+
+                    // Format: "17 Destination 5 min"
+                    bottom_text.push_str(line_n.as_str()).ok();
+                    bottom_text.push(' ').ok();
+                    bottom_text.push_str(dest_n.as_str()).ok();
+                    bottom_text.push(' ').ok();
+                    bottom_text.push_str(time_n.as_str()).ok();
+                }
+
+                // Calculate text width in pixels (6 pixels per character)
+                let text_width = bottom_text.len() as i32 * 6;
+
+                // Draw the scrolling text with offset (creates continuous loop)
+                // Start from right edge and scroll left
+                // Draw first instance
+                draw_text(
+                    fb,
+                    bottom_text.as_str(),
+                    (COLS as i32) - scroll_offset,
+                    20,
+                    Color::new(0, 255, 0),
+                );
+
+                // Draw second instance to create seamless loop
+                // Position it one full screen width after the first instance
+                draw_text(
+                    fb,
+                    bottom_text.as_str(),
+                    (COLS as i32) - scroll_offset + text_width + COLS as i32,
+                    20,
+                    Color::new(0, 255, 0),
+                );
+            }
         } else {
-            line1.push_str(dest.as_str()).ok();
-        }
+            // Single screen: show "17 Dest" on line 1, "2 min" on line 2
+            let mut line1 = heapless::String::<16>::new();
+            line1.push_str(line.as_str()).ok();
+            line1.push(' ').ok();
 
-        draw_text(fb, line1.as_str(), 2, 8, Color::new(0, 255, 0));
-        draw_text(fb, time.as_str(), 2, 20, Color::new(0, 255, 0));
+            // Truncate destination to fit (about 7-8 chars max)
+            let max_dest_len = 8;
+            if dest.len() > max_dest_len {
+                line1.push_str(&dest.as_str()[..max_dest_len]).ok();
+            } else {
+                line1.push_str(dest.as_str()).ok();
+            }
+
+            draw_text(fb, line1.as_str(), 2, 8, Color::new(0, 255, 0));
+            draw_text(fb, time.as_str(), 2, 20, Color::new(0, 255, 0));
+        }
     }
 }
 

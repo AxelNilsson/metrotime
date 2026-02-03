@@ -189,7 +189,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     // Now draw "no departures" in GREEN using custom bitmap font
-    metrotimes3::display::draw_departures(fb, &[]);
+    metrotimes3::display::draw_departures(fb, &[], 0);
 
     // Wrap framebuffer in mutex for safe sharing
     let fb_mutex: &'static Mutex<
@@ -246,11 +246,27 @@ async fn main(spawner: Spawner) -> ! {
         Mutex::new(Vec::new())
     );
 
+    // Create shared scroll offset (using AtomicI32 for lock-free updates)
+    use core::sync::atomic::AtomicI32;
+    let scroll_offset: &'static AtomicI32 = mk_static!(AtomicI32, AtomicI32::new(0));
+
     // Start data fetch task on Core 0 (updates departure data every 30s)
     info!("Starting data fetch task on Core 0...");
     spawner
-        .spawn(data_fetch_task(stack, tls_seed, fb_mutex, departure_data))
+        .spawn(data_fetch_task(stack, tls_seed, departure_data))
         .expect("Failed to spawn data fetch task");
+
+    // Start scroll task on Core 0 (updates scroll offset)
+    info!("Starting scroll task on Core 0...");
+    spawner
+        .spawn(scroll_task(departure_data, scroll_offset))
+        .expect("Failed to spawn scroll task");
+
+    // Start render task on Core 0 (redraws display with current scroll offset)
+    info!("Starting render task on Core 0...");
+    spawner
+        .spawn(render_task(fb_mutex, departure_data, scroll_offset))
+        .expect("Failed to spawn render task");
 
     // Main task just waits
     loop {
@@ -284,15 +300,17 @@ async fn display_refresh_task(
         if counter % 5000 == 0 {
             info!("Display: {} frames rendered", counter);
         }
+
+        // Run at ~200fps (5ms) to maintain brightness while allowing render task to update
+        Timer::after(Duration::from_millis(5)).await;
     }
 }
 
-/// Data fetching task - periodically fetches metro data and updates display
+/// Data fetching task - periodically fetches metro data
 #[embassy_executor::task]
 async fn data_fetch_task(
     stack: &'static embassy_net::Stack<'static>,
     tls_seed: u64,
-    fb: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
     departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData>,
 ) -> ! {
     info!("Data fetch task started");
@@ -315,26 +333,143 @@ async fn data_fetch_task(
             Ok(departures) => {
                 info!("Fetched {} departures", departures.len());
 
-                // Store departure data
+                // Store departure data (scroll task will handle the display update)
                 let mut data = departure_data.lock().await;
                 *data = departures.clone();
                 drop(data);
 
-                // Update framebuffer
-                let mut fb_locked = fb.lock().await;
-                fb_locked.erase();
-                metrotimes3::display::draw_departures(&mut *fb_locked, &departures);
-                drop(fb_locked);
-
-                info!("Updated display with new data");
+                info!("Updated departure data");
             }
             Err(e) => {
                 error!("Failed to fetch data: {:?}", e);
             }
         }
 
-        info!("Waiting 30 seconds until next fetch...");
-        Timer::after(Duration::from_secs(30)).await;
+        info!("Waiting 20 seconds until next fetch...");
+        Timer::after(Duration::from_secs(20)).await;
+    }
+}
+
+/// Scrolling task - updates scroll offset (lock-free)
+#[embassy_executor::task]
+async fn scroll_task(
+    departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData>,
+    scroll_offset: &'static core::sync::atomic::AtomicI32,
+) -> ! {
+    use core::sync::atomic::Ordering;
+
+    info!("Scroll task started");
+    let mut cached_departures: DepartureData = Vec::new();
+    let mut total_width = 0;
+
+    loop {
+        // Get current departure data
+        let data = departure_data.lock().await;
+        let departures = data.clone();
+        drop(data);
+
+        // Check if stations/lines changed (ignore time changes)
+        let stations_changed = departures.len() != cached_departures.len()
+            || departures
+                .iter()
+                .zip(cached_departures.iter())
+                .any(|(a, b)| {
+                    // Only compare line and destination, not time
+                    a.0 != b.0 || a.1 != b.1
+                });
+
+        if stations_changed {
+            // Only reset scroll if actual stations changed
+            cached_departures = departures.clone();
+            scroll_offset.store(0, Ordering::Relaxed);
+
+            if cached_departures.is_empty() || cached_departures.len() <= 1 {
+                total_width = 0;
+            } else {
+                // Calculate total width of scrolling text
+                total_width = 0;
+                for i in 1..cached_departures.len() {
+                    let (line, dest, time) = &cached_departures[i];
+                    let entry_len = line.len() + 1 + dest.len() + 1 + time.len();
+                    total_width += entry_len * 6;
+                    if i > 1 {
+                        total_width += 12; // Separator "  " = 2 chars = 12 pixels
+                    }
+                }
+                info!(
+                    "Scroll: stations changed, recalculated total_width={}",
+                    total_width
+                );
+            }
+        } else if departures != cached_departures {
+            // Times updated but stations are the same - just update cached data without resetting scroll
+            cached_departures = departures.clone();
+        }
+
+        if total_width > 0 {
+            // Update scroll offset (lock-free atomic operation)
+            let current = scroll_offset.load(Ordering::Relaxed);
+            // Reset after scrolling: text width + screen width
+            // This lets the text fully scroll across the display before looping
+            let reset_point = total_width as i32 + metrotimes3::display::DISPLAY_COLS as i32;
+            let next = if current >= reset_point {
+                0
+            } else {
+                current + 1
+            };
+            scroll_offset.store(next, Ordering::Relaxed);
+
+            if next % 100 == 0 {
+                info!("Scroll: offset={} (reset at {})", next, reset_point);
+            }
+        }
+
+        // Scroll speed at ~15Hz (66ms per frame)
+        Timer::after(Duration::from_millis(66)).await;
+    }
+}
+
+/// Render task - redraws the display with current scroll offset
+#[embassy_executor::task]
+async fn render_task(
+    fb: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
+    departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData>,
+    scroll_offset: &'static core::sync::atomic::AtomicI32,
+) -> ! {
+    use core::sync::atomic::Ordering;
+
+    info!("Render task started");
+    let mut frame_count = 0u32;
+
+    loop {
+        // Get current departure data and scroll offset
+        let data = departure_data.lock().await;
+        let departures = data.clone();
+        drop(data);
+
+        let offset = scroll_offset.load(Ordering::Relaxed);
+
+        // Redraw the display
+        let mut fb_locked = fb.lock().await;
+
+        // Only erase the display area (much faster than full erase)
+        use embedded_graphics::prelude::*;
+        for y in 0..32 {
+            for x in 0..metrotimes3::display::DISPLAY_COLS as i32 {
+                fb_locked.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
+            }
+        }
+
+        metrotimes3::display::draw_departures(&mut *fb_locked, &departures, offset);
+        drop(fb_locked);
+
+        frame_count += 1;
+        if frame_count % 100 == 0 {
+            info!("Render: {} frames", frame_count);
+        }
+
+        // Render at same speed as scroll for smooth animation
+        Timer::after(Duration::from_millis(30)).await;
     }
 }
 
