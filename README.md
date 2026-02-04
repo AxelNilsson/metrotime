@@ -8,26 +8,47 @@ MetroTimes3 is an embedded Rust application that fetches real-time departure inf
 
 ## Features
 
-- Real-time metro departure information from SL (Storstockholms Lokaltrafik)
-- HUB75 LED matrix display (64x32 pixels)
-- WiFi connectivity with automatic reconnection
-- Dual-core architecture: dedicated display refresh on Core 1, data fetching on Core 0
-- Configurable via TOML configuration file
-- Low-latency display updates with DMA transfers
+- **Real-time metro departure information** from SL (Storstockholms Lokaltrafik)
+- **Multi-screen support** - 1 to 3 HUB75 panels (64×32 each)
+- **Butter-smooth rendering** with zero frame drops
+  - Lock-free channel architecture (no cross-core mutex contention)
+  - Double-buffered framebuffers (no render/display blocking)
+  - 200Hz display refresh, 100Hz render updates
+- **PSRAM enabled** - 2MB external RAM for large API responses and framebuffers
+- **Dual-core isolation**
+  - Core 0: Network/API/JSON parsing (can stutter without affecting display)
+  - Core 1: Display refresh + rendering (consistently smooth)
+- **WiFi connectivity** with automatic reconnection
+- **Configurable** via TOML configuration file
+- **Low-latency DMA** transfers to LED matrix
 - Support for filtering by line, direction, and transport type
+- **100% safe Rust** - zero `unsafe` blocks!
 
 ## Hardware Requirements
 
-- ESP32-S3 development board
-- HUB75 LED matrix panel (64x32 recommended)
-- Appropriate power supply for LED matrix
+- **ESP32-S3 development board** (Matrix Portal S3 recommended)
+  - 8MB Flash
+  - 2MB PSRAM (required for multi-screen support)
+  - 512KB internal SRAM
+- **HUB75 LED matrix panels** (64×32 pixels each)
+  - Supports 1-3 panels side-by-side
+  - Current config: 2 panels (128×32 total display)
+- **Appropriate 5V power supply** for LED matrix
+  - ~2A per panel recommended
 
-### Pin Configuration
+### Pin Configuration (Matrix Portal S3)
 
 The following GPIO pins are used for the HUB75 display:
-- GPIO42, GPIO41, GPIO40, GPIO38, GPIO39: Data pins
-- GPIO37, GPIO45, GPIO36, GPIO48, GPIO35: Control pins
-- GPIO21, GPIO14, GPIO2, GPIO47: Additional control pins
+
+**RGB Data:**
+- RGB1: GPIO42 (R1), GPIO41 (G1), GPIO40 (B1)
+- RGB2: GPIO38 (R2), GPIO39 (G2), GPIO37 (B2)
+
+**Address Lines:**
+- GPIO45 (A), GPIO36 (B), GPIO48 (C), GPIO35 (D), GPIO21 (E)
+
+**Control:**
+- GPIO2 (CLK), GPIO47 (LAT), GPIO14 (OE/BLANK)
 
 ## Software Requirements
 
@@ -51,6 +72,15 @@ ssid = "YOUR_WIFI_SSID"
 password = "YOUR_WIFI_PASSWORD"
 ```
 
+### Display Configuration
+```toml
+[display]
+num_screens = 2  # Number of 64x32 panels (1, 2, or 3)
+rows = 32
+cols = 64
+scroll_speed_ms = 50  # Scroll speed (lower = faster)
+```
+
 ### API Configuration
 ```toml
 [api]
@@ -59,7 +89,8 @@ mode = "departures"  # or "arrivals"
 transport = "METRO"
 direction = 1  # 1 for south, 2 for north
 forecast = 60  # Minutes ahead to fetch
-request_interval_secs = 30
+request_interval_secs = 20
+buffer_size = 262144  # 256KB buffer for API responses (uses PSRAM)
 ```
 
 ### Finding Your Station ID
@@ -108,12 +139,26 @@ metrotimes3/
 
 ## Architecture
 
-The application uses a dual-core architecture:
+MetroTimes3 uses a sophisticated **three-layer stutter-elimination architecture**:
 
-- **Core 0**: Network stack, WiFi management, and API data fetching
-- **Core 1**: High-priority display refresh task using DMA
+### Layer 1: Core Isolation
+- **Core 0**: Network/WiFi/HTTP/JSON parsing (variable latency, can stutter)
+- **Core 1**: Display refresh + rendering (consistent, butter-smooth)
 
-This separation ensures smooth, flicker-free display updates even during network operations.
+### Layer 2: Lock-Free Channel
+- Core 0 → Core 1 data passing via `Channel` (no mutex contention!)
+- Core 0: `.send()` when data ready (non-blocking)
+- Core 1: `.try_receive()` to check for updates (non-blocking)
+
+### Layer 3: Double Buffering
+- **Two framebuffers** with separate mutexes (~200KB each in PSRAM)
+- Display refresh reads from **active** buffer (fb0 or fb1)
+- Render task writes to **inactive** buffer (fb1 or fb0)
+- Atomic swap when render complete (~1 instruction)
+
+**Result:** Zero frame drops, butter-smooth scrolling at all times!
+
+📖 **See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed diagrams and explanation**
 
 ## Dependencies
 
@@ -129,16 +174,30 @@ Key dependencies include:
 
 ### Logging
 
-The application uses `esp-println` for logging. Set the log level via environment variables:
+The application uses `esp-println` for logging. Set the log level:
 
 ```bash
-export RUST_LOG=info
-cargo run --release
+# Info level (default)
+ESP_LOG=info cargo run --release
+
+# Debug level (shows frame counts, scroll updates, channel events)
+ESP_LOG=debug cargo run --release
 ```
 
 ### Memory Configuration
 
-The application allocates 73,744 bytes of heap memory from the ESP32-S3's reclaimed RAM region.
+**PSRAM Enabled (2MB external RAM):**
+- Dual framebuffers: ~400KB (200KB × 2)
+- API response buffer: 256KB
+- Free PSRAM: ~1.35MB (ready for 3rd screen!)
+
+**Internal SRAM (512KB):**
+- Heap: 120KB (for WiFi/system)
+- Stack/System: ~392KB
+
+**Flash (8MB):**
+- Program size: ~633KB
+- Free: 7.4MB
 
 ## Troubleshooting
 
@@ -153,7 +212,8 @@ The application allocates 73,744 bytes of heap memory from the ESP32-S3's reclai
 ### API Errors
 - Verify your station `site_id` is correct
 - Check that the SL API is accessible from your network
-- Increase `buffer_size` if responses are larger than expected
+- **Response too large errors**: Increase `buffer_size` in config.toml (current: 256KB)
+- **Out of memory**: Enable PSRAM feature (should be enabled by default)
 
 ## License
 
