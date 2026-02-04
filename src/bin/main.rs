@@ -33,7 +33,6 @@ const API_FETCH_INTERVAL_SECS: u64 = 20; // Fetch new data every 20 seconds
 
 // Logging intervals
 const DISPLAY_LOG_INTERVAL: u32 = 5000; // Log every 5000 frames
-const SCROLL_LOG_INTERVAL: i32 = 100; // Log every 100 pixels
 const RENDER_LOG_INTERVAL: u32 = 100; // Log every 100 frames
 
 // Type alias for departure data: (line, destination, time)
@@ -184,42 +183,49 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
 
-    // Create framebuffer and initialize with content BEFORE starting refresh
-    let fb = mk_static!(
+    // Double buffering: 2 separate mutex-wrapped framebuffers (no contention!)
+    // Display refresh locks one, render locks the other - different mutexes = no blocking
+    let fb0 = mk_static!(
+        metrotimes3::display::DisplayFrameBuffer,
+        metrotimes3::display::DisplayFrameBuffer::new()
+    );
+    let fb1 = mk_static!(
         metrotimes3::display::DisplayFrameBuffer,
         metrotimes3::display::DisplayFrameBuffer::new()
     );
 
-    // Fill entire screen black first
+    // Initialize both buffers
     use embedded_graphics::prelude::*;
-
     for y in 0..metrotimes3::display::DISPLAY_ROWS as i32 {
         for x in 0..metrotimes3::display::DISPLAY_COLS as i32 {
-            fb.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
+            fb0.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
+            fb1.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
         }
     }
+    metrotimes3::display::draw_loading(fb0);
+    metrotimes3::display::draw_loading(fb1);
 
-    // Show "LOADING" message initially
-    metrotimes3::display::draw_loading(fb);
-
-    // Wrap framebuffer in mutex for safe sharing
-    let fb_mutex: &'static Mutex<
+    // Wrap each in its own mutex
+    let fb0_mutex: &'static Mutex<
         CriticalSectionRawMutex,
         metrotimes3::display::DisplayFrameBuffer,
-    > = mk_static!(
-        Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
-        Mutex::new(*fb)
-    );
+    > = mk_static!(Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>, Mutex::new(*fb0));
+    let fb1_mutex: &'static Mutex<
+        CriticalSectionRawMutex,
+        metrotimes3::display::DisplayFrameBuffer,
+    > = mk_static!(Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>, Mutex::new(*fb1));
 
-    // Create shared departure data storage
-    let departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData> = mk_static!(
-        Mutex<CriticalSectionRawMutex, DepartureData>,
-        Mutex::new(Vec::new())
-    );
+    // Atomic flag: which buffer is currently "active" for display (true = fb0, false = fb1)
+    use core::sync::atomic::AtomicBool;
+    let active_is_zero: &'static AtomicBool = mk_static!(AtomicBool, AtomicBool::new(true));
 
-    // Create shared scroll offset (using AtomicI32 for lock-free updates)
-    use core::sync::atomic::AtomicI32;
-    let scroll_offset: &'static AtomicI32 = mk_static!(AtomicI32, AtomicI32::new(0));
+    // Lock-free channel for passing departure data from Core 0 → Core 1
+    // No mutex contention = no stutter!
+    use embassy_sync::channel::Channel;
+    let departure_channel: &'static Channel<CriticalSectionRawMutex, DepartureData, 1> = mk_static!(
+        Channel<CriticalSectionRawMutex, DepartureData, 1>,
+        Channel::new()
+    );
 
     // Start second core for display operations (dedicated core)
     // Architecture:
@@ -230,8 +236,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let cpu1_fn = {
         let display = display;
-        let departure_data_core1 = departure_data;
-        let scroll_offset_core1 = scroll_offset;
+        let departure_channel_core1 = departure_channel;
         move || {
             let hp_executor = mk_static!(
                 InterruptExecutor<2>,
@@ -241,19 +246,26 @@ async fn main(spawner: Spawner) -> ! {
 
             // Display refresh runs as high priority on dedicated core
             high_pri_spawner
-                .spawn(display_refresh_task(display, fb_mutex))
+                .spawn(display_refresh_task(
+                    display,
+                    fb0_mutex,
+                    fb1_mutex,
+                    active_is_zero,
+                ))
                 .ok();
 
             // Low priority executor for render task (still on Core 1, isolated from network/parsing)
             let lp_executor = mk_static!(Executor, Executor::new());
 
-            // Render task runs on Core 1 to avoid stutters from Core 0 network/parsing work
+            // Render task runs on Core 1, handles both rendering and scrolling
+            // This avoids cross-core data contention
             lp_executor.run(move |spawner| {
                 spawner
-                    .spawn(render_task(
-                        fb_mutex,
-                        departure_data_core1,
-                        scroll_offset_core1,
+                    .spawn(render_and_scroll_task(
+                        fb0_mutex,
+                        fb1_mutex,
+                        active_is_zero,
+                        departure_channel_core1,
                     ))
                     .ok();
             });
@@ -280,14 +292,10 @@ async fn main(spawner: Spawner) -> ! {
     // Start data fetch task on Core 0 (updates departure data, handles parsing)
     info!("Starting data fetch task on Core 0...");
     spawner
-        .spawn(data_fetch_task(stack, tls_seed, departure_data))
+        .spawn(data_fetch_task(stack, tls_seed, departure_channel))
         .expect("Failed to spawn data fetch task");
 
-    // Start scroll task on Core 0 (updates scroll offset - lightweight)
-    info!("Starting scroll task on Core 0...");
-    spawner
-        .spawn(scroll_task(departure_data, scroll_offset))
-        .expect("Failed to spawn scroll task");
+    // Scroll logic moved to render_task on Core 1 (avoids cross-core data sharing)
 
     // Main task just waits
     loop {
@@ -296,33 +304,43 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 /// Display refresh task - continuously refreshes the HUB75 display
+/// With double buffering: locks active buffer only (separate mutex from render)
 #[embassy_executor::task]
 async fn display_refresh_task(
     mut hub75: Hub75<'static, esp_hal::Blocking>,
-    fb: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
+    fb0: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
+    fb1: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
+    active_is_zero: &'static core::sync::atomic::AtomicBool,
 ) -> ! {
-    info!("Display refresh task started");
+    use core::sync::atomic::Ordering;
+    info!("Display refresh task started (double buffered, safe Rust!)");
     let mut counter = 0u32;
     loop {
-        // Lock the framebuffer for the ENTIRE render cycle including DMA transfer
-        // This prevents Core 0 from modifying the framebuffer while DMA is reading it
-        let fb_locked = fb.lock().await;
+        // Select active buffer to read from
+        let active_fb = if active_is_zero.load(Ordering::Acquire) {
+            fb0
+        } else {
+            fb1
+        };
+
+        // Lock active buffer (render task locks the OTHER one - no contention!)
+        let fb_locked = active_fb.lock().await;
         let xfer = hub75
             .render(&*fb_locked)
             .map_err(|(e, _)| e)
             .expect("failed to render");
 
-        // Wait for DMA to complete BEFORE releasing the lock
+        // Wait for DMA to complete
         let (_result, new_hub75) = xfer.wait();
         hub75 = new_hub75;
-        drop(fb_locked); // NOW it's safe to release
+        drop(fb_locked);
 
         counter += 1;
         if counter % DISPLAY_LOG_INTERVAL == 0 {
             debug!("Display: {} frames rendered", counter);
         }
 
-        // Run at ~200fps to maintain brightness while allowing render task to update
+        // Run at ~200fps to maintain brightness
         Timer::after(Duration::from_millis(DISPLAY_REFRESH_INTERVAL_MS)).await;
     }
 }
@@ -332,9 +350,13 @@ async fn display_refresh_task(
 async fn data_fetch_task(
     stack: &'static embassy_net::Stack<'static>,
     tls_seed: u64,
-    departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData>,
+    departure_channel: &'static embassy_sync::channel::Channel<
+        CriticalSectionRawMutex,
+        DepartureData,
+        1,
+    >,
 ) -> ! {
-    info!("Data fetch task started");
+    info!("Data fetch task started (using lock-free channel)");
 
     loop {
         // Check network connectivity before making request
@@ -354,12 +376,10 @@ async fn data_fetch_task(
             Ok(departures) => {
                 info!("Fetched {} departures", departures.len());
 
-                // Store departure data (scroll task will handle the display update)
-                let mut data = departure_data.lock().await;
-                *data = departures.clone();
-                drop(data);
+                // Send to channel (no mutex lock needed - lock-free!)
+                departure_channel.send(departures).await;
 
-                info!("Updated departure data");
+                info!("Sent departure data to channel");
             }
             Err(e) => {
                 error!("Failed to fetch data: {:?}", e);
@@ -374,130 +394,112 @@ async fn data_fetch_task(
     }
 }
 
-/// Scrolling task - updates scroll offset (lock-free)
+/// Combined render and scroll task - runs entirely on Core 1
+/// Receives data from Core 0 via lock-free channel (no mutex contention!)
+/// With double buffering: locks inactive buffer (separate mutex from display)
 #[embassy_executor::task]
-async fn scroll_task(
-    departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData>,
-    scroll_offset: &'static core::sync::atomic::AtomicI32,
+async fn render_and_scroll_task(
+    fb0: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
+    fb1: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
+    active_is_zero: &'static core::sync::atomic::AtomicBool,
+    departure_channel: &'static embassy_sync::channel::Channel<
+        CriticalSectionRawMutex,
+        DepartureData,
+        1,
+    >,
 ) -> ! {
     use core::sync::atomic::Ordering;
 
-    info!("Scroll task started");
+    info!("Render+Scroll task started on Core 1 (double buffered, lock-free channel!)");
+    let mut frame_count = 0u32;
+    let mut scroll_offset = 0i32;
     let mut cached_departures: DepartureData = Vec::new();
-    let mut total_width = 0;
+    let mut total_scroll_width = 0i32;
+    let mut last_scroll_tick = embassy_time::Instant::now();
 
     loop {
-        // Get current departure data
-        let data = departure_data.lock().await;
-        let departures = data.clone();
-        drop(data);
+        // Try to receive new data from channel (non-blocking)
+        if let Ok(new_departures) = departure_channel.try_receive() {
+            info!("Received {} departures from channel", new_departures.len());
 
-        // Check if stations/lines changed (ignore time changes)
-        let stations_changed = departures.len() != cached_departures.len()
-            || departures
-                .iter()
-                .zip(cached_departures.iter())
-                .any(|(a, b)| {
-                    // Only compare line and destination, not time
-                    a.0 != b.0 || a.1 != b.1
-                });
+            // Check if stations/lines changed (ignore time changes)
+            let stations_changed = new_departures.len() != cached_departures.len()
+                || new_departures
+                    .iter()
+                    .zip(cached_departures.iter())
+                    .any(|(a, b)| a.0 != b.0 || a.1 != b.1);
 
-        if stations_changed {
-            // Only reset scroll if actual stations changed
-            cached_departures = departures.clone();
-            scroll_offset.store(0, Ordering::Relaxed);
+            if stations_changed {
+                // Reset scroll when stations change
+                scroll_offset = 0;
+                debug!("Stations changed, reset scroll");
 
-            if cached_departures.is_empty() || cached_departures.len() <= 1 {
-                total_width = 0;
-            } else {
-                // Calculate total width of scrolling text
-                total_width = 0;
-                for i in 1..cached_departures.len() {
-                    let (line, dest, time) = &cached_departures[i];
-                    let entry_len = line.len() + 1 + dest.len() + 1 + time.len();
-                    total_width += entry_len * 6;
-                    if i > 1 {
-                        total_width += 12; // Separator "  " = 2 chars = 12 pixels
+                // Recalculate scroll width
+                if new_departures.len() <= 1 {
+                    total_scroll_width = 0;
+                } else {
+                    total_scroll_width = 0;
+                    for i in 1..new_departures.len() {
+                        let (line, dest, time) = &new_departures[i];
+                        let entry_len = line.len() + 1 + dest.len() + 1 + time.len();
+                        total_scroll_width += entry_len as i32 * 6;
+                        if i > 1 {
+                            total_scroll_width += 12;
+                        }
                     }
                 }
-                debug!(
-                    "Scroll: stations changed, recalculated total_width={}",
-                    total_width
-                );
             }
-        } else if departures != cached_departures {
-            // Times updated but stations are the same - just update cached data without resetting scroll
-            cached_departures = departures.clone();
+
+            cached_departures = new_departures;
         }
 
-        if total_width > 0 {
-            // Update scroll offset (lock-free atomic operation)
-            let current = scroll_offset.load(Ordering::Relaxed);
-            // Reset after scrolling: text width + screen width
-            // This lets the text fully scroll across the display before looping
-            let reset_point = total_width as i32 + metrotimes3::display::DISPLAY_COLS as i32;
-            let next = if current >= reset_point {
-                0
+        // Update scroll position (only if needed)
+        if total_scroll_width > 0 {
+            let now = embassy_time::Instant::now();
+            if now.duration_since(last_scroll_tick).as_millis() >= display::SCROLL_SPEED_MS {
+                last_scroll_tick = now;
+                let reset_point = total_scroll_width + metrotimes3::display::DISPLAY_COLS as i32;
+                scroll_offset = if scroll_offset >= reset_point {
+                    0
+                } else {
+                    scroll_offset + 1
+                };
+            }
+        }
+
+        // Redraw if needed (when scroll changes or initial draw)
+        if !cached_departures.is_empty() {
+            // Get the INACTIVE buffer (not currently being displayed)
+            let inactive_fb = if active_is_zero.load(Ordering::Acquire) {
+                fb1 // Display reads fb0, so we write to fb1
             } else {
-                current + 1
+                fb0 // Display reads fb1, so we write to fb0
             };
-            scroll_offset.store(next, Ordering::Relaxed);
 
-            if next % SCROLL_LOG_INTERVAL == 0 {
-                debug!("Scroll: offset={} (reset at {})", next, reset_point);
-            }
-        }
+            // Lock inactive buffer - display task locks the OTHER one (no contention!)
+            let mut fb_locked = inactive_fb.lock().await;
 
-        // Scroll speed (configured in config.toml)
-        Timer::after(Duration::from_millis(display::SCROLL_SPEED_MS)).await;
-    }
-}
-
-/// Render task - redraws the display with current scroll offset
-#[embassy_executor::task]
-async fn render_task(
-    fb: &'static Mutex<CriticalSectionRawMutex, metrotimes3::display::DisplayFrameBuffer>,
-    departure_data: &'static Mutex<CriticalSectionRawMutex, DepartureData>,
-    scroll_offset: &'static core::sync::atomic::AtomicI32,
-) -> ! {
-    use core::sync::atomic::Ordering;
-
-    info!("Render task started on Core 1 (isolated from Core 0 network/parsing)");
-    let mut frame_count = 0u32;
-    let mut last_offset = -1i32;
-    let mut cached_departures: DepartureData = Vec::new();
-
-    loop {
-        // Check if anything changed
-        let offset = scroll_offset.load(Ordering::Relaxed);
-        let data = departure_data.lock().await;
-        let departures = data.clone();
-        drop(data);
-
-        // Redraw if scroll position changed OR departure data changed (including time updates)
-        let data_changed = departures != cached_departures;
-        if offset != last_offset || data_changed {
-            last_offset = offset;
-            cached_departures = departures.clone();
-
-            // Redraw the display
-            let mut fb_locked = fb.lock().await;
-
-            // Only erase the display area (much faster than full erase)
+            // Clear and draw to inactive buffer
             use embedded_graphics::prelude::*;
-            for y in 0..32 {
-                for x in 0..metrotimes3::display::DISPLAY_COLS as i32 {
-                    fb_locked.set_pixel(Point::new(x, y), esp_hub75::Color::BLACK);
-                }
-            }
+            use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
+            let clear_rect = Rectangle::new(
+                Point::new(0, 0),
+                Size::new(metrotimes3::display::DISPLAY_COLS as u32, 32),
+            );
+            let _ = clear_rect
+                .into_styled(PrimitiveStyle::with_fill(esp_hub75::Color::BLACK))
+                .draw(&mut *fb_locked);
 
-            // Draw appropriate content based on departure data
-            if departures.is_empty() {
-                metrotimes3::display::draw_no_departures(&mut *fb_locked);
-            } else {
-                metrotimes3::display::draw_departures(&mut *fb_locked, &departures, offset);
-            }
+            // Draw appropriate content
+            metrotimes3::display::draw_departures(
+                &mut *fb_locked,
+                &cached_departures,
+                scroll_offset,
+            );
             drop(fb_locked);
+
+            // Swap buffers atomically - instant operation!
+            active_is_zero.fetch_xor(true, Ordering::Release);
 
             frame_count += 1;
             if frame_count % RENDER_LOG_INTERVAL == 0 {
@@ -505,7 +507,7 @@ async fn render_task(
             }
         }
 
-        // Poll frequently to catch changes quickly
+        // Poll at 100Hz (10ms) for smooth updates
         Timer::after(Duration::from_millis(10)).await;
     }
 }

@@ -10,7 +10,7 @@ use embassy_net::{
     tcp::client::{TcpClient, TcpClientState},
 };
 use embassy_time::{Duration, with_timeout};
-use log::{error, info};
+use log::{debug, error, info};
 use reqwless::client::{HttpClient, TlsConfig};
 extern crate alloc;
 use alloc::vec;
@@ -134,13 +134,14 @@ fn parse_and_display(
 > {
     match serde_json_core::from_str::<ApiResponse>(content) {
         Ok((api_response, _)) => {
-            info!("============================================================");
+            // Reduce logging to prevent serial output from blocking during JSON parsing
+            debug!("============================================================");
             if let Some(line) = api::LINE {
-                info!("Metro Departures for Line {}", line);
+                debug!("Metro Departures for Line {}", line);
             } else {
-                info!("Metro Departures");
+                debug!("Metro Departures");
             }
-            info!("============================================================");
+            debug!("============================================================");
 
             let mut departures_list = heapless::Vec::new();
 
@@ -148,17 +149,17 @@ fn parse_and_display(
                 info!("No departures found");
             } else {
                 for (idx, departure) in api_response.departures.iter().enumerate() {
-                    info!("--- Departure {} ---", idx + 1);
-                    info!(
+                    debug!("--- Departure {} ---", idx + 1);
+                    debug!(
                         "  Line: {} ({})",
                         departure.line.designation, departure.line.group_of_lines
                     );
-                    info!("  Destination: {}", departure.destination);
-                    info!("  Display: {}", departure.display);
-                    info!("  State: {}", departure.state);
-                    info!("  Scheduled: {}", departure.scheduled);
-                    info!("  Expected: {}", departure.expected);
-                    info!(
+                    debug!("  Destination: {}", departure.destination);
+                    debug!("  Display: {}", departure.display);
+                    debug!("  State: {}", departure.state);
+                    debug!("  Scheduled: {}", departure.scheduled);
+                    debug!("  Expected: {}", departure.expected);
+                    debug!(
                         "  Stop: {} (Platform {})",
                         departure.stop_point.name, departure.stop_point.designation
                     );
@@ -173,12 +174,12 @@ fn parse_and_display(
                             heapless::String::try_from(departure.display).unwrap_or_default();
                         departures_list.push((line, dest, time)).ok();
                     } else {
-                        info!("  -> Skipping cancelled departure");
+                        debug!("  -> Skipping cancelled departure");
                     }
                 }
             }
 
-            info!("============================================================");
+            debug!("============================================================");
             Ok(departures_list)
         }
         Err(e) => {
