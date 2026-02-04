@@ -83,8 +83,10 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     info!("HAL initialized with CPU clock: {:?}", CpuClock::max());
 
-    // Framebuffer is allocated as static data (not heap), size reduced via 2-bit color depth
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+    // Dual heap setup: internal SRAM for WiFi/system, PSRAM for large buffers
+    // WiFi needs internal SRAM (fast access), large buffers can use PSRAM
+    esp_alloc::heap_allocator!(size: 120_000); // 120KB internal SRAM for WiFi/system
+    esp_alloc::psram_allocator!(&peripherals.PSRAM, esp_hal::psram); // 2MB PSRAM for buffers
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_ints = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);

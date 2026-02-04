@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/config.rs"));
 // Display configuration
 const ROWS: usize = display::ROWS;
 const COLS: usize = display::COLS;
-const BITS: u8 = 2; // 2-bit color depth (reduced for larger displays to save memory)
+const BITS: u8 = 1; // 1-bit color depth (minimal memory for larger displays)
 const NROWS: usize = compute_rows(ROWS);
 const FRAME_COUNT: usize = compute_frame_count(BITS);
 

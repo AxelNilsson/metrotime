@@ -12,6 +12,8 @@ use embassy_net::{
 use embassy_time::{Duration, with_timeout};
 use log::{error, info};
 use reqwless::client::{HttpClient, TlsConfig};
+extern crate alloc;
+use alloc::vec;
 
 use crate::types::ApiResponse;
 
@@ -34,11 +36,13 @@ pub async fn fetch_departures(
     >,
     &'static str,
 > {
-    let mut rx_buffer = [0; api::BUFFER_SIZE];
-    let mut tx_buffer = [0; 4096];
+    // Use heap-allocated buffers (PSRAM) instead of stack arrays
+    // TcpClientState needs smaller const generic sizes (compile-time)
+    let mut rx_buffer = vec![0u8; 16384]; // 16KB for TLS
+    let mut tx_buffer = vec![0u8; 8192]; // 8KB for TLS
     let dns = DnsSocket::new(*stack);
     // Increase socket count from 1 to 2 for better resilience
-    let tcp_state = TcpClientState::<2, { api::BUFFER_SIZE }, 4096>::new();
+    let tcp_state = TcpClientState::<2, 16384, 8192>::new();
     let tcp = TcpClient::new(*stack, &tcp_state);
 
     let tls = TlsConfig::new(
@@ -49,7 +53,7 @@ pub async fn fetch_departures(
     );
 
     let mut client = HttpClient::new_with_tls(&tcp, &dns, tls);
-    let mut buffer = [0u8; api::BUFFER_SIZE];
+    let mut buffer = vec![0u8; api::BUFFER_SIZE];
 
     // Build URL from config
     let url = api::build_url();
