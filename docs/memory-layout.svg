@@ -1,0 +1,47 @@
+<svg viewBox="0 0 600 500" xmlns="http://www.w3.org/2000/svg">
+  <text x="300" y="30" text-anchor="middle" font-size="18" font-weight="bold">
+    Memory Layout (ESP32-S3 Matrix Portal)
+  </text>
+
+  <!-- Internal SRAM -->
+  <rect x="50" y="60" width="200" height="100" fill="#e3f2fd" stroke="#1976d2" stroke-width="2" rx="5"/>
+  <text x="150" y="85" text-anchor="middle" font-size="14" font-weight="bold">Internal SRAM (~512KB)</text>
+  <text x="150" y="105" text-anchor="middle" font-size="11">Heap: 120KB</text>
+  <text x="150" y="120" text-anchor="middle" font-size="11">WiFi/Radio: ~80KB</text>
+  <text x="150" y="135" text-anchor="middle" font-size="11">Stack/System: ~312KB</text>
+  <text x="150" y="150" text-anchor="middle" font-size="11" fill="#1976d2">Fast access!</text>
+
+  <!-- PSRAM -->
+  <rect x="300" y="60" width="250" height="400" fill="#fff9c4" stroke="#f57f17" stroke-width="3" rx="5"/>
+  <text x="425" y="85" text-anchor="middle" font-size="14" font-weight="bold">PSRAM (2MB External)</text>
+
+  <!-- Framebuffer 0 -->
+  <rect x="320" y="100" width="210" height="70" fill="#ffccbc" stroke="#d84315" stroke-width="2" rx="5"/>
+  <text x="425" y="125" text-anchor="middle" font-size="12" font-weight="bold">Framebuffer 0</text>
+  <text x="425" y="145" text-anchor="middle" font-size="11">32×128×1-bit + DMA</text>
+  <text x="425" y="160" text-anchor="middle" font-size="11">~200KB</text>
+
+  <!-- Framebuffer 1 -->
+  <rect x="320" y="185" width="210" height="70" fill="#ffccbc" stroke="#d84315" stroke-width="2" rx="5"/>
+  <text x="425" y="210" text-anchor="middle" font-size="12" font-weight="bold">Framebuffer 1</text>
+  <text x="425" y="230" text-anchor="middle" font-size="11">32×128×1-bit + DMA</text>
+  <text x="425" y="245" text-anchor="middle" font-size="11">~200KB</text>
+
+  <!-- API Buffer -->
+  <rect x="320" y="270" width="210" height="60" fill="#c8e6c9" stroke="#388e3c" stroke-width="2" rx="5"/>
+  <text x="425" y="295" text-anchor="middle" font-size="12" font-weight="bold">API Response Buffer</text>
+  <text x="425" y="315" text-anchor="middle" font-size="11">256KB (heap allocated)</text>
+
+  <!-- Free space -->
+  <rect x="320" y="345" width="210" height="100" fill="#f5f5f5" stroke="#666" stroke-width="1" stroke-dasharray="5,5" rx="5"/>
+  <text x="425" y="380" text-anchor="middle" font-size="12" font-weight="bold">Free PSRAM</text>
+  <text x="425" y="400" text-anchor="middle" font-size="11">~1.35MB available</text>
+  <text x="425" y="420" text-anchor="middle" font-size="10" fill="#666">Ready for 3rd screen!</text>
+
+  <!-- Flash -->
+  <rect x="50" y="180" width="200" height="80" fill="#e0e0e0" stroke="#616161" stroke-width="2" rx="5"/>
+  <text x="150" y="205" text-anchor="middle" font-size="14" font-weight="bold">Flash (8MB)</text>
+  <text x="150" y="225" text-anchor="middle" font-size="11">Program Code: 633KB</text>
+  <text x="150" y="240" text-anchor="middle" font-size="11">Free: 7.4MB</text>
+  <text x="150" y="255" text-anchor="middle" font-size="11" fill="#666">(Read-only at runtime)</text>
+</svg>

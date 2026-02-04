@@ -1,0 +1,53 @@
+<svg viewBox="0 0 700 400" xmlns="http://www.w3.org/2000/svg">
+  <text x="350" y="30" text-anchor="middle" font-size="18" font-weight="bold">
+    Double Buffering (Core 1)
+  </text>
+
+  <!-- Timeline -->
+  <text x="50" y="80" font-size="14" font-weight="bold">Frame N:</text>
+
+  <!-- Display reads FB0 -->
+  <rect x="150" y="60" width="150" height="60" fill="#c8e6c9" stroke="#388e3c" stroke-width="2" rx="5"/>
+  <text x="225" y="85" text-anchor="middle" font-size="12" font-weight="bold">Display Refresh</text>
+  <text x="225" y="105" text-anchor="middle" font-size="11">Reads FB0 (2ms)</text>
+
+  <!-- Render writes FB1 -->
+  <rect x="350" y="60" width="150" height="60" fill="#ffccbc" stroke="#d84315" stroke-width="2" rx="5"/>
+  <text x="425" y="85" text-anchor="middle" font-size="12" font-weight="bold">Render Task</text>
+  <text x="425" y="105" text-anchor="middle" font-size="11">Writes FB1 (15ms)</text>
+
+  <text x="550" y="95" font-size="14" fill="#388e3c">✓ No blocking!</text>
+
+  <!-- Atomic Swap -->
+  <rect x="250" y="150" width="200" height="40" fill="#fff9c4" stroke="#f57f17" stroke-width="2" rx="5"/>
+  <text x="350" y="175" text-anchor="middle" font-size="12" font-weight="bold">
+    ⚡ Atomic Swap (~1 instruction)
+  </text>
+
+  <!-- Timeline -->
+  <text x="50" y="230" font-size="14" font-weight="bold">Frame N+1:</text>
+
+  <!-- Display reads FB1 (swapped!) -->
+  <rect x="150" y="210" width="150" height="60" fill="#c8e6c9" stroke="#388e3c" stroke-width="2" rx="5"/>
+  <text x="225" y="235" text-anchor="middle" font-size="12" font-weight="bold">Display Refresh</text>
+  <text x="225" y="255" text-anchor="middle" font-size="11">Reads FB1 (2ms)</text>
+
+  <!-- Render writes FB0 (swapped!) -->
+  <rect x="350" y="210" width="150" height="60" fill="#ffccbc" stroke="#d84315" stroke-width="2" rx="5"/>
+  <text x="425" y="235" text-anchor="middle" font-size="12" font-weight="bold">Render Task</text>
+  <text x="425" y="255" text-anchor="middle" font-size="11">Writes FB0 (15ms)</text>
+
+  <text x="550" y="245" font-size="14" fill="#388e3c">✓ Still no blocking!</text>
+
+  <!-- Key insight box -->
+  <rect x="100" y="310" width="500" height="70" fill="#e8f5e9" stroke="#388e3c" stroke-width="2" rx="5"/>
+  <text x="350" y="335" text-anchor="middle" font-size="13" font-weight="bold" fill="#388e3c">
+    🔑 Key Insight: Different Mutexes = No Contention
+  </text>
+  <text x="350" y="355" text-anchor="middle" font-size="11">
+    Mutex(FB0) and Mutex(FB1) are separate - tasks never block each other!
+  </text>
+  <text x="350" y="370" text-anchor="middle" font-size="11">
+    Display can lock FB0 while Render locks FB1 simultaneously
+  </text>
+</svg>
