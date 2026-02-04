@@ -29,9 +29,9 @@ pub type Hub75Type = Hub75<'static, esp_hal::Blocking>;
 pub const DISPLAY_ROWS: usize = ROWS;
 pub const DISPLAY_COLS: usize = COLS;
 
-// Simple 5x7 bitmap font (each character is 5 pixels wide, 7 pixels tall)
+// Simple 5x8 bitmap font (each character is 5 pixels wide, 8 pixels tall)
 // Bit pattern: top to bottom, left to right
-const FONT_5X7: &[(&str, [u8; 5])] = &[
+const FONT_5X8: &[(&str, [u8; 5])] = &[
     // Digits
     ("0", [0x7E, 0x81, 0x81, 0x81, 0x7E]),
     ("1", [0x00, 0x82, 0xFF, 0x80, 0x00]),
@@ -110,7 +110,7 @@ const FONT_5X7: &[(&str, [u8; 5])] = &[
 /// Draw a single character at position (x, y)
 fn draw_char(fb: &mut DisplayFrameBuffer, c: char, x: i32, y: i32, color: Color) {
     // Find character in font
-    let char_data = FONT_5X7.iter().find(|(ch, _)| ch.chars().next() == Some(c));
+    let char_data = FONT_5X8.iter().find(|(ch, _)| ch.chars().next() == Some(c));
 
     if let Some((_, columns)) = char_data {
         for (col_idx, &column) in columns.iter().enumerate() {
