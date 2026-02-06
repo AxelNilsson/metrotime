@@ -335,9 +335,12 @@ async fn display_refresh_task(
         hub75 = new_hub75;
         drop(fb_locked);
 
-        counter += 1;
-        if counter % DISPLAY_LOG_INTERVAL == 0 {
-            debug!("Display: {} frames rendered", counter);
+        // Only increment counter if debug logging is enabled
+        if log::log_enabled!(log::Level::Debug) {
+            counter = counter.wrapping_add(1);
+            if counter % DISPLAY_LOG_INTERVAL == 0 {
+                debug!("Display: {} frames rendered", counter);
+            }
         }
 
         // Run at ~200fps to maintain brightness
@@ -416,41 +419,66 @@ async fn render_and_scroll_task(
     let mut cached_departures: DepartureData = Vec::new();
     let mut total_scroll_width = 0i32;
     let mut last_scroll_tick = embassy_time::Instant::now();
+    let mut consecutive_empty_responses = 0u8;
+    let mut show_no_departures = false;
 
     loop {
         // Try to receive new data from channel (non-blocking)
         if let Ok(new_departures) = departure_channel.try_receive() {
             info!("Received {} departures from channel", new_departures.len());
 
-            // Check if stations/lines changed (ignore time changes)
-            let stations_changed = new_departures.len() != cached_departures.len()
-                || new_departures
-                    .iter()
-                    .zip(cached_departures.iter())
-                    .any(|(a, b)| a.0 != b.0 || a.1 != b.1);
+            // Track consecutive empty responses to handle API flakiness
+            if new_departures.is_empty() {
+                consecutive_empty_responses = consecutive_empty_responses.saturating_add(1);
+                info!("Empty response count: {}", consecutive_empty_responses);
 
-            if stations_changed {
-                // Reset scroll when stations change
-                scroll_offset = 0;
-                debug!("Stations changed, reset scroll");
+                // Only clear cached data after 3 consecutive empty responses
+                // This prevents flickering when API occasionally returns empty data
+                if consecutive_empty_responses >= 3 {
+                    if !cached_departures.is_empty() {
+                        info!("3+ consecutive empty responses - clearing display");
+                        cached_departures.clear();
+                        scroll_offset = 0;
+                        total_scroll_width = 0;
+                        show_no_departures = true;
+                    }
+                }
+                // Otherwise keep showing stale data
+            } else {
+                // Got valid data - reset empty counter
+                consecutive_empty_responses = 0;
+                show_no_departures = false;
 
-                // Recalculate scroll width
-                if new_departures.len() <= 1 {
-                    total_scroll_width = 0;
-                } else {
-                    total_scroll_width = 0;
-                    for i in 1..new_departures.len() {
-                        let (line, dest, time) = &new_departures[i];
-                        let entry_len = line.len() + 1 + dest.len() + 1 + time.len();
-                        total_scroll_width += entry_len as i32 * 6;
-                        if i > 1 {
-                            total_scroll_width += 12;
+                // Check if stations/lines changed (ignore time changes)
+                let stations_changed = new_departures.len() != cached_departures.len()
+                    || new_departures
+                        .iter()
+                        .zip(cached_departures.iter())
+                        .any(|(a, b)| a.0 != b.0 || a.1 != b.1);
+
+                if stations_changed {
+                    // Reset scroll when stations change
+                    scroll_offset = 0;
+                    debug!("Stations changed, reset scroll");
+
+                    // Recalculate scroll width
+                    if new_departures.len() <= 1 {
+                        total_scroll_width = 0;
+                    } else {
+                        total_scroll_width = 0;
+                        for i in 1..new_departures.len() {
+                            let (line, dest, time) = &new_departures[i];
+                            let entry_len = line.len() + 1 + dest.len() + 1 + time.len();
+                            total_scroll_width += entry_len as i32 * 6;
+                            if i > 1 {
+                                total_scroll_width += 12;
+                            }
                         }
                     }
                 }
-            }
 
-            cached_departures = new_departures;
+                cached_departures = new_departures;
+            }
         }
 
         // Update scroll position (only if needed)
@@ -462,13 +490,13 @@ async fn render_and_scroll_task(
                 scroll_offset = if scroll_offset >= reset_point {
                     0
                 } else {
-                    scroll_offset + 1
+                    scroll_offset.wrapping_add(1)
                 };
             }
         }
 
         // Redraw if needed (when scroll changes or initial draw)
-        if !cached_departures.is_empty() {
+        if !cached_departures.is_empty() || show_no_departures {
             // Get the INACTIVE buffer (not currently being displayed)
             let inactive_fb = if active_is_zero.load(Ordering::Acquire) {
                 fb1 // Display reads fb0, so we write to fb1
@@ -491,19 +519,26 @@ async fn render_and_scroll_task(
                 .draw(&mut *fb_locked);
 
             // Draw appropriate content
-            metrotimes3::display::draw_departures(
-                &mut *fb_locked,
-                &cached_departures,
-                scroll_offset,
-            );
+            if show_no_departures {
+                metrotimes3::display::draw_no_departures(&mut *fb_locked);
+            } else {
+                metrotimes3::display::draw_departures(
+                    &mut *fb_locked,
+                    &cached_departures,
+                    scroll_offset,
+                );
+            }
             drop(fb_locked);
 
             // Swap buffers atomically - instant operation!
             active_is_zero.fetch_xor(true, Ordering::Release);
 
-            frame_count += 1;
-            if frame_count % RENDER_LOG_INTERVAL == 0 {
-                debug!("Render: {} frames", frame_count);
+            // Only increment counter if debug logging is enabled
+            if log::log_enabled!(log::Level::Debug) {
+                frame_count = frame_count.wrapping_add(1);
+                if frame_count % RENDER_LOG_INTERVAL == 0 {
+                    debug!("Render: {} frames", frame_count);
+                }
             }
         }
 

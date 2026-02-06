@@ -55,67 +55,75 @@ pub async fn fetch_departures(
     let mut client = HttpClient::new_with_tls(&tcp, &dns, tls);
     let mut buffer = vec![0u8; api::BUFFER_SIZE];
 
-    // Build URL from config
-    let url = api::build_url();
+    // Explicitly scope the HTTP request to ensure connection is closed
+    let result = async {
+        // Build URL from config
+        let url = api::build_url();
 
-    info!("Making HTTP request to: {}", url);
-    info!("Creating HTTP request...");
+        info!("Making HTTP request to: {}", url);
+        info!("Creating HTTP request...");
 
-    // Add 20 second timeout for creating request (DNS + TCP connect + TLS handshake)
-    let mut http_req = with_timeout(
-        Duration::from_secs(20),
-        client.request(reqwless::request::Method::GET, url.as_str()),
-    )
-    .await
-    .map_err(|_| {
-        error!("Timeout creating HTTP request after 20 seconds");
-        "Request creation timeout"
-    })?
-    .map_err(|e| {
-        error!("Failed to create HTTP request: {:?}", e);
-        "Failed to create HTTP request"
-    })?;
-
-    info!("Sending HTTP request...");
-
-    // Add 15 second timeout for sending request and receiving response
-    let response = with_timeout(Duration::from_secs(15), http_req.send(&mut buffer))
+        // Add 20 second timeout for creating request (DNS + TCP connect + TLS handshake)
+        let mut http_req = with_timeout(
+            Duration::from_secs(20),
+            client.request(reqwless::request::Method::GET, url.as_str()),
+        )
         .await
         .map_err(|_| {
-            error!("Timeout sending HTTP request after 15 seconds");
-            "Request send timeout"
+            error!("Timeout creating HTTP request after 20 seconds");
+            "Request creation timeout"
         })?
         .map_err(|e| {
-            error!("Failed to send HTTP request: {:?}", e);
-            "Failed to send HTTP request"
+            error!("Failed to create HTTP request: {:?}", e);
+            "Failed to create HTTP request"
         })?;
 
-    info!("Got response!");
+        info!("Sending HTTP request...");
 
-    let status = response.status;
-    info!("Got response from server - Status: {:?}", status);
+        // Add 15 second timeout for sending request and receiving response
+        let response = with_timeout(Duration::from_secs(15), http_req.send(&mut buffer))
+            .await
+            .map_err(|_| {
+                error!("Timeout sending HTTP request after 15 seconds");
+                "Request send timeout"
+            })?
+            .map_err(|e| {
+                error!("Failed to send HTTP request: {:?}", e);
+                "Failed to send HTTP request"
+            })?;
 
-    // Add 10 second timeout for reading response body
-    let res = with_timeout(Duration::from_secs(10), response.body().read_to_end())
-        .await
-        .map_err(|_| {
-            error!("Timeout reading response body after 10 seconds");
-            "Response read timeout"
-        })?
-        .map_err(|_| "Failed to read response body")?;
+        info!("Got response!");
 
-    let content = core::str::from_utf8(res).map_err(|_| "Response is not valid UTF-8")?;
+        let status = response.status;
+        info!("Got response from server - Status: {:?}", status);
 
-    info!("Response ({} bytes)", res.len());
+        // Add 10 second timeout for reading response body
+        let res = with_timeout(Duration::from_secs(10), response.body().read_to_end())
+            .await
+            .map_err(|_| {
+                error!("Timeout reading response body after 10 seconds");
+                "Response read timeout"
+            })?
+            .map_err(|_| "Failed to read response body")?;
 
-    // Check if response is suspiciously small
-    if res.len() < api::MIN_RESPONSE_SIZE {
-        error!("Response too small, might be an error: {}", content);
-        return Err("Response too small");
+        let content = core::str::from_utf8(res).map_err(|_| "Response is not valid UTF-8")?;
+
+        info!("Response ({} bytes)", res.len());
+
+        // Check if response is suspiciously small
+        if res.len() < api::MIN_RESPONSE_SIZE {
+            error!("Response too small, might be an error: {}", content);
+            return Err("Response too small");
+        }
+
+        // Parse and display results
+        parse_and_display(content)
     }
+    .await;
 
-    // Parse and display results
-    parse_and_display(content)
+    // Resources (client, tcp, dns, buffers) are automatically dropped here in correct order
+    // No explicit drops needed - RAII handles cleanup
+    result
 }
 
 /// Parse JSON and display departure information
