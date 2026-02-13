@@ -131,7 +131,7 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn network task
     spawner.spawn(net_task(runner)).ok();
 
-    // Connect WiFi (keep controller alive by storing it)
+    // Connect WiFi (keep controller alive by making it static)
     let station_config = esp_radio::wifi::ModeConfig::Client(
         esp_radio::wifi::ClientConfig::default()
             .with_ssid(wifi::SSID.into())
@@ -143,8 +143,11 @@ async fn main(spawner: Spawner) -> ! {
     wifi_controller.start().unwrap();
     wifi_controller.connect().unwrap();
 
-    // Store wifi_controller so it doesn't get dropped
-    let _wifi_controller = wifi_controller;
+    // Make wifi_controller static and wrap in Mutex for reconnection logic
+    let wifi_controller = mk_static!(
+        Mutex<CriticalSectionRawMutex, esp_radio::wifi::WifiController<'static>>,
+        Mutex::new(wifi_controller)
+    );
 
     // Wait for network
     wait_for_network(&stack).await;
@@ -292,7 +295,12 @@ async fn main(spawner: Spawner) -> ! {
     // Start data fetch task on Core 0 (updates departure data, handles parsing)
     info!("Starting data fetch task on Core 0...");
     spawner
-        .spawn(data_fetch_task(stack, tls_seed, departure_channel))
+        .spawn(data_fetch_task(
+            stack,
+            tls_seed,
+            departure_channel,
+            wifi_controller,
+        ))
         .expect("Failed to spawn data fetch task");
 
     // Scroll logic moved to render_task on Core 1 (avoids cross-core data sharing)
@@ -358,19 +366,36 @@ async fn data_fetch_task(
         DepartureData,
         1,
     >,
+    wifi_controller: &'static Mutex<
+        CriticalSectionRawMutex,
+        esp_radio::wifi::WifiController<'static>,
+    >,
 ) -> ! {
     info!("Data fetch task started (using lock-free channel)");
 
     loop {
-        // Check network connectivity before making request
+        // Check network connectivity and attempt reconnection if needed
         if !stack.is_link_up() {
-            error!("WiFi link is down, skipping fetch");
+            error!("WiFi link is down, attempting reconnection...");
+
+            // Try to reconnect
+            {
+                let mut wifi = wifi_controller.lock().await;
+                if let Err(e) = wifi.connect() {
+                    error!("Failed to reconnect WiFi: {:?}", e);
+                    drop(wifi);
+                    Timer::after(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+
+            info!("WiFi reconnection initiated, waiting for link...");
             Timer::after(Duration::from_secs(5)).await;
             continue;
         }
 
         if stack.config_v4().is_none() {
-            error!("No IP address, skipping fetch");
+            error!("No IP address, waiting for DHCP...");
             Timer::after(Duration::from_secs(5)).await;
             continue;
         }
